@@ -3,8 +3,8 @@ title: "Exploratory data analysis, dimension reduction, and latent variable mode
 author: "null"
 date: "null"
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 ---
 
 ## Homework Problems
