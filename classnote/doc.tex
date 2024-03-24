@@ -1,0 +1,147 @@
+\documentclass[12pt]{article}
+\usepackage[a4paper, total={7in,9.6in}]{geometry}
+\begin{document}
+
+
+%Big header
+\renewcommand{\H}[1]{\Large\textbf{#1}\\[2mm]\normalsize}
+%Small header
+\newcommand{\h}[1]{\large\textbf{#1}\\[2mm]\normalsize}
+%Paragraph break
+\newcommand{\n}{\\[6mm]}
+%textbf alias
+\renewcommand{\b}[1]{\textbf{#1}}
+%textit alias
+\renewcommand{\i}[1]{\textit{#1}}
+
+\raggedright
+
+\H{Classnote 3:\\Batch effects, technical variables, and unwanted variation}
+Maciej Bielecki\\[12mm]
+
+
+In molecular biology, \b{batch effects} refer to changes in experimental data
+induced by seemingly irrelevant non-biological factors, such as variance in
+personnel, conditions within the laboratory, or minute differences between the
+used reagents or instruments.
+\n
+
+As batch effects lead to unwanted variation in the data, they can influence
+what conclusions can be derived from it, and thus need to be dealt with 
+appropriately. Further confounding the matter is the fact that the multiple 
+\b{technical variables} behind batch effects are typically not recorded in a
+verbose manner, instead being conflated into a single \b{surrogate variable},
+usually just the processing date of the sample.
+\n
+
+Broadly speaking, there are three stages in the statistical
+analysis of batch effects: exploratory analysis, downstream analysis,
+and diagnostic analysis \cite{leek10}.
+\n
+
+During \b{exploratory analysis}, samples are clustered and labeled by both 
+biological variables, which are the actual subject of the research, and
+technical variables (often surrogates). Based on the PCA of the data,
+principal components which correlate to the technical variables are identified.
+\n
+
+During \b{downstream analysis}, the data is adjusted for identified batch
+effects, typically through clustering, linear regression or with ComBat
+(explained later). In the event that the recorded technical variables are
+insufficient in explaining all the artefacts present within the data, which is
+particularly likely if said variables were surrogates, surrogate variable
+analysis may be carried out to learn more about the artefacts.
+\n
+
+Lastly, \b{diagnostic analysis} refers to re-clustering the adjusted data and
+confirming whether or not batch effects have been eliminated.
+\n
+
+The aforementioned \b{surrogate variable analysis} (SVA) obviates the need to
+know in advance which technical variables cause batch effects, as it
+automatically estimates the sources of batch effects based on the data 
+\cite{leek07}. The most well-known method for carrying out SVA is the
+\texttt{sva} Bioconductor package \cite{sva}.
+\n
+
+\b{ComBat} is an algorithm for adjusting data for batch effects, designed to be
+robust for data with small batch sizes \cite{johnson07}, available as part of
+the aforementioned \texttt{sva} Bioconductor package. This algorithm assumes
+an location/scale model (L/S model) for the data, defined as:
+\[ 
+	Y_{ijg} = 
+	\alpha_{g} + 
+	X\beta_{g} + 
+	\gamma_{ig} + 
+	\delta_{ig}\epsilon_{ijg},
+\]
+where $Y_{ijg}$ is the data matrix, $\alpha_{g}$ is the overall gene expression,
+$X\beta_{g}$ is a matrix of sample conditions, $\gamma_{ig}$ and $\delta_{ig}$
+are the additive and multiplicative batch effects respectively, with 
+$\delta_{ig}$ further modified by noise $\epsilon_{ijg}$. $i$, $j$ and $g$
+represent specific batches, samples and genes, respectively.
+\n
+
+The algorithm first standardizes the data, such that genes have similar overall 
+means and variances. The standardized data is calculated as:
+\[
+	Z_{ijg} = 
+	\frac
+		{
+			Y_{ijg} - 
+			\hat{\alpha}_{g} - 
+			X\hat{\beta}_{g}
+		}
+		{
+			\hat{\sigma}_{g}
+		},
+\]
+where $Z_{ijg}$ is the data after standardization, $\hat{\alpha}_{g}$ and
+$X\hat{\beta}_{g}$ are estimates of the corresponding model variables, and
+$\hat{\sigma}_{g}$ is the estimated standard deviation.
+\n
+
+Upon standardization, the batch effects' parameters are estimated via conditional
+posterior means, and the data is adjusted based on those estimates as:
+\[ 
+	Y^{*}_{ijg} =
+	\frac
+		{
+			Y_{ijg} - 
+			\hat{\alpha}_{g} - 
+			X\hat{\beta}_{g} - 
+			\hat{\gamma}_{ig}
+		}
+		{
+			\hat{\delta}_{ig}
+		} + 
+	\hat{\alpha}_{g} + 
+	X\hat{\beta}_{g},
+\]
+where $Y^{*}_{ijg}$ is data post-adjustment, while $\hat{\gamma}_{ig}$ and
+$\hat{\delta}_{ig}$ are estimates of $\gamma_{ig}$ and $\delta_{ig}$.
+\\[20mm]
+
+
+\begin{thebibliography}{9}
+
+\bibitem{leek10}
+	Leek JT, Scharpf R, Bravo H \i{et al},
+	Tackling the widespread and critical impact of batch effects in high-throughput data,
+	\i{Nat Rev Genet}, 11, 733–739, 2010.
+\bibitem{leek07}
+	Leek JT, Storey JD,
+	Capturing Heterogeneity in Gene Expression Studies by Surrogate Variable Analysis,
+	\i{PLoS Genet}, 3(9), 1724-1735, 2007.
+\bibitem{sva}
+	Leek JT, Johnson WE, Parker HS, Fertig EJ, Jaffe AE, Zhang Y, Storey JD, Torres LC,
+	sva: Surrogate Variable Analysis,
+	2010.
+\bibitem{johnson07}
+	Johnson WE, Li C,
+	Adjusting batch effects in microarray expression data using empirical Bayes methods,
+	\i{Biostatistics}, 8(1), 118-127, 2007.
+
+\end{thebibliography}
+
+\end{document}
