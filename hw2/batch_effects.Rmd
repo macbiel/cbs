@@ -176,9 +176,7 @@ sapply(batches, function(x) table(x$outcome)) -> outcomes
 rownames(outcomes) = paste(sep="", "Outcome #", c(1,2,3,4,5), ": ", rownames(outcomes))
 colnames(outcomes) = paste(sep="", "Batch #", colnames(outcomes))
 
-pdf("Bielecki_problem1.pdf")
 grid.arrange(tableGrob(outcomes))
-dev.off()
 ```
 
 # Linear model with technical variables
@@ -293,7 +291,6 @@ combat_edata_s=combat_edata[,rownames(pheno[order(pheno$batch),])]
 
 ###knitr refused to produce these graphs, so the commands had to be commented out
 ###see PDF files for results
-#pdf("Bielecki_problem2_1.pdf")
 #heatmap.2(
 #          edata_s,
 #          main = "Bladder Cancer Data, pre-ComBat, batch-sorted",
@@ -306,8 +303,6 @@ combat_edata_s=combat_edata[,rownames(pheno[order(pheno$batch),])]
 #          scale = "column"                          # scale by column
 #          
 #          )
-#dev.off()
-#pdf("Bielecki_problem2_2.pdf")
 #heatmap.2(
 #          combat_edata_s,
 #          main = "Bladder Cancer Data, after cleaning with ComBat, batch-sorted",
@@ -319,7 +314,6 @@ combat_edata_s=combat_edata[,rownames(pheno[order(pheno$batch),])]
 #          Colv=FALSE,
 #          scale = "column"                          # scale by column
 #          )
-#dev.off()
 ```
 
 > *Homework Problem 3:*
@@ -334,13 +328,9 @@ paste(rownames(pheno), samples, sep=": ") -> samples
 colnames(edata) = samples
 colnames(combat_edata) = samples
 
-pdf("Bielecki_problem3_1.pdf")
 pheatmap(cor(edata), fontsize = 7)
-dev.off()
 
-pdf("Bielecki_problem3_2.pdf")
 pheatmap(cor(combat_edata), fontsize = 7)
-dev.off()
 ```
 
 
@@ -413,14 +403,10 @@ B_est_compare <- tibble(
   LinearModel = tB_mod_un %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J") %>% select("estimate") %>% unlist,
   ComBat = tB_mod_cb %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J") %>% select("estimate") %>% unlist)
 
-pdf("Bielecki_problem4_1.pdf")
 ggplot(B_est_compare, aes(x=LinearModel, y=ComBat)) +
      geom_point(col="darkgrey", alpha=.5, size=.5) + geom_abline(intercept=0, slope=1, col="darkred") + geom_smooth(method = "lm", se = TRUE)  + theme_bw()
-dev.off()
 
-pdf("Bielecki_problem4_2.pdf")
 ggplot(tB_mod_cb %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J")) + geom_histogram(aes(x=p.value), bins = 100, fill="darkorange")
-dev.off()
 ```
 
 # Surrogate Variable Analysis (SVA)
@@ -562,13 +548,9 @@ est_compare <- tibble(
   LinearModel = mod_tidy %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J") %>% select("estimate") %>% unlist,
   ComBat = modcombat_tidy %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J") %>% select("estimate") %>% unlist)
 
-pdf("Bielecki_problem5_1.pdf")
 ggplot(est_compare, aes(x=LinearModel, y=ComBat)) +
      geom_point(col="darkgrey", alpha=.5, size=.5) + geom_abline(intercept=0, slope=1, col="darkred") + geom_smooth(method = "lm", se = TRUE)  + theme_bw()
-dev.off()
-pdf("Bielecki_problem5_2.pdf")
 ggplot(modcombat_tidy %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J")) + geom_histogram(aes(x=p.value), bins = 100, fill="darkorange")
-dev.off()
 ```
 
 ```{r}
@@ -591,11 +573,7 @@ est_compare <- tibble(
   
   SVA = modsva_tidy %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J") %>% select("estimate") %>% unlist)
 
-pdf("Bielecki_problem5_3.pdf")
 ggplot(est_compare, aes(x=LinearModel, y=SVA)) +
      geom_point(col="darkgrey", alpha=.5, size=.5) + geom_abline(intercept=0, slope=1, col="darkred") + geom_smooth(method = "lm", se = TRUE)  + theme_bw()
-dev.off()
-pdf("Bielecki_problem5_4.pdf")
 ggplot(modsva_tidy %>% filter(term == "as.factor(B_pheno$strain)C57BL/6J")) + geom_histogram(aes(x=p.value), bins = 100, fill="darkorange")
-dev.off()
 ```
