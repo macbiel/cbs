@@ -1,0 +1,247 @@
+## Problem 1
+
+### Initialization
+This step loads the required libraries and the dataset:
+```{r init, results='hide'}
+#Required for plotting
+options(bitmapType = "cairo")
+
+#Load libraries
+library(dplyr,		quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(Seurat,		quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+library(patchwork,	quietly=TRUE, verbose=FALSE, warn.conflicts=FALSE)
+
+# Load dataset
+pbmc <- CreateSeuratObject(
+				#Data directory
+				counts = Read10X(data.dir = "./data/filtered_matrices_mex/hg19/"),
+				#Dataset name
+				project = "pbmc68k",
+				#Omit features detected in <5 cells
+				min.cells = 5,
+				#Omit cells with <200 featues
+				min.features = 200
+			)
+```
+
+
+
+### Pre-processing
+This step carries out the 4-stage preprocessing of the dataset: QC, normalization, feature selection, centering and scaling.
+
+#### Stage 1: QC
+
+First, QC metrics are visualized:
+```{r qc1}
+#Get QC metrics
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+
+#Plot QC metrics
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") 
+```
+
+Based on them, inferior-quality data is filtered out of the dataset:
+```{r qc2}
+pbmc <- subset(pbmc,
+				#Filter out data from cells which:
+				#1. have less than 300 or more than 2000 features, or
+				#2. have more than 4% mitochondrial counts
+				subset = nFeature_RNA > 300 & nFeature_RNA < 2000 & percent.mt < 4)
+```
+
+#### Stage 2: Normalization
+```{r norm}
+pbmc <- NormalizeData(pbmc)
+```
+
+#### Stage 3: Feature selection
+```{r ftsel, fig.height=5, fig.width=11}
+pbmc <- FindVariableFeatures(pbmc, selection.method = 'vst', nfeatures = 2000)
+
+#Plot the relevant features
+varfts_plot <- VariableFeaturePlot(pbmc)
+varfts_plot + LabelPoints(plot = varfts_plot, points = head(VariableFeatures(pbmc), 10), repel = TRUE)
+```
+
+#### Stage 4: Centering/scaling
+
+Due to ceaseless OOM errors in this step, I had to restrict the scaled fetures to only the variable features (by omitting the `features` argument passed to `Seurat::ScaleData()`).
+This shouldn't affect the PCA and clustering results, but the heatmaps (see below) will likely be off. I've included them nonetheless.
+```{r scale}
+pbmc <- ScaleData(pbmc,
+					#Helps prevent OOM errors
+					block.size=1)
+```
+
+
+
+### PCA
+
+In this step, PCA of the pre-processed data is carried out.
+
+First, carry out the PCA proper:
+```{r pca}
+#Carry out the PCA
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+
+#Plot PCA results
+VizDimLoadings(pbmc, dims = 1:2, reduction = 'pca')
+DimPlot(pbmc, reduction = 'pca')
+DimHeatmap(pbmc, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(pbmc, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+Next, find which of the principal components are actually significant:
+```{r sigcomps}
+#Carry out JackStraw
+pbmc <- JackStraw(pbmc, num.replicate = 100)
+pbmc <- ScoreJackStraw(pbmc, dims = 1:20)
+
+#Plot JackStraw results
+JackStrawPlot(pbmc, dims = 1:20)
+
+
+#Also produce an elbow plot
+ElbowPlot(pbmc)
+```
+
+Based on this, I assumed a cutoff between the 10th and 11th PCs.
+
+
+
+### Clustering & tSNE
+
+This step carries out the clustering and tSNE of the dataset.
+
+Firstly, clustering:
+```{r cluster}
+pbmc <- FindNeighbors(pbmc, dims = 1:10)
+pbmc <- FindClusters(pbmc,
+						#Value picked to net 10 clusters
+						resolution = 0.15)
+```
+
+Secondly, tSNE:
+```{r tsne}
+pbmc <- RunUMAP(pbmc, dims = 1:10)
+```
+
+Lastly, the results of tSNE are visualized as in Zheng et al. 2017.
+```{r tsnevis}
+#Retrieve the number of cells in each cluster
+ccc <- table(Idents(pbmc))
+
+#Transform absolute counts into percentages
+ccc <- ccc / sum(ccc) * 100
+
+#Append cluster IDs to percentages
+ccc <- sprintf("%s: %.2f%%", levels(pbmc), ccc)
+
+#Apply these percentages as cluster names
+names(ccc) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, ccc)
+
+#Plot
+DimPlot(pbmc, reduction = 'umap', label=TRUE) + NoLegend()
+
+#Restore nondescript cluster names
+oldcls <- names(ccc)
+names(oldcls) <- as.character(ccc)
+pbmc <- RenameIdents(pbmc, oldcls)
+```
+
+
+
+
+***
+
+
+
+
+## Problem 2
+
+Here, each of the 10 clusters is independently re-clustered.
+
+The following helper function will be used to automatically re-cluster and plot each cluster:
+```{r subclust-func}
+#Arguments:
+#	cluster:	Name of the cluster to re-cluster
+#	resolution:	Passed to Seurat::FindClusters(); can be changed to alter the number of created sub-clusters
+recluster <- function(cluster, resolution) {
+	
+	#Retrieve the requested cluster
+
+	cl <- subset(x = pbmc, idents = cluster)
+
+	#Carry out clustering and tSNE
+	cl <- FindNeighbors(cl, dims = 1:10, verbose=FALSE)
+	cl <- FindClusters(cl, resolution=resolution, verbose=FALSE)
+	cl <- RunUMAP(cl, dims = 1:10, verbose=FALSE)
+
+	#Format sub-cluster names
+	ccc <- table(Idents(cl))
+	ccc <- ccc / sum(ccc) * 100
+	ccc <- sprintf("%s/%s: %.2f%%", cluster, levels(cl), ccc)
+	names(ccc) <- levels(cl)
+	cl <- RenameIdents(cl, ccc)
+
+	#Plot
+	return(DimPlot(cl, reduction = 'umap', label=TRUE) + NoLegend())
+}
+```
+
+Now, each cluster will be re-clustered proper.
+
+Cluster no. 0, for 2 sub-clusters:
+```{r subclust0}
+recluster("0", 0.15)
+```
+
+Cluster no. 1, for 2 sub-clusters:
+```{r subclust1}
+recluster("1", 0.2)
+```
+
+Cluster no. 2, for 3 sub-clusters:
+```{r subclust2}
+recluster("2", 0.2)
+```
+
+Cluster no. 3, for 1 sub-cluster, so no actual further clustering:
+```{r subclust3}
+recluster("3", 0.1)
+```
+
+Cluster no. 4, for 2 sub-clusters:
+```{r subclust4}
+recluster("4", 0.1)
+```
+
+Cluster no. 5, for 3 sub-clusters:
+```{r subclust5}
+recluster("5", 0.1)
+```
+
+Cluster no. 6, for 4 sub-clusters:
+```{r subclust6}
+recluster("6", 0.2)
+```
+
+Cluster no. 7, for 2 sub-clusters:
+```{r subclust7}
+recluster("7", 0.25)
+```
+
+Cluster no. 8, for 2 sub-clusters:
+```{r subclust8}
+recluster("8", 0.1)
+```
+
+Cluster no. 9, for 2 sub-clusters:
+```{r subclust9}
+recluster("9", 0.5)
+```
+
