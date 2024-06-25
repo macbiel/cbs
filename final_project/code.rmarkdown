@@ -1,0 +1,390 @@
+---
+title: "Reanalysis of mouse-rat comparative gene expression data towards batch effects"
+author: Maciej Bielecki
+date: ""
+output:
+  html_document:
+    df_print: paged
+---
+```{r libs, include=FALSE}
+#Homologue retrieval
+library(biomaRt)	#Trawling ENSEMBL
+#Visualizations
+library(pheatmap)	#Correlation heatmaps
+library(ggplot2)	#SVD plots
+#Reanalysis
+library(EDASeq)		#Normalization, GC content retrieval
+library(edgeR)		#Normalization
+library(sva)		#ComBat()
+#Statistical analysis
+library(lme4)		#Linear model fitting
+#For rmarkdown rendering, not part of the actual analysis
+library(knitr)		#kable()
+options(bitmapType = "cairo")
+```
+
+---
+
+## Data preparation
+
+The dataset is retrieved and loaded.
+```{r load_data}
+#Functions for loading TSV files
+tsv_df = function(fn) read.csv(fn, sep="\t", header=TRUE, check.names=FALSE)
+tsv_matrix = function(fn) as.matrix(tsv_df(fn))
+
+#Retrieve dataset remotely
+mice_raw = tsv_matrix("https://www.ebi.ac.uk/biostudies/files/E-MTAB-6081/mouse_counts.txt")
+rats_raw = tsv_matrix("https://www.ebi.ac.uk/biostudies/files/E-MTAB-6081/rat_counts.txt")
+
+#Load metadata
+metadata = rbind(	tsv_df("https://www.ebi.ac.uk/biostudies/files/E-MTAB-6081/mouse_design.txt"),
+					tsv_df("https://www.ebi.ac.uk/biostudies/files/E-MTAB-6081/rat_design.txt"))
+#Get tissue, species and batch columns
+metadata$species = c(rep("Mouse", 39), rep("Rat", 40))
+colnames(metadata)[2] = "tissue"
+metadata$batch = as.integer(gsub(".*_L00([0-9])_.*", "\\1", metadata$file, perl=TRUE)) - 1
+```
+
+
+The mouse and rat dataset are currently separate matrices, but Gilad and Mizrahi-Man operate on a single matrix combining both human and mouse samples.
+To concatenate the matrices properly, homologous mouse and rat genes need to be paired up.
+Söllner *et al*. provide a list of the top 147 most similar homologue pairs.
+Further homologues are retrieved from ENSEMBL, MGI and HGNC.
+```{r homologues}
+#Retrieve top 174 homologues provided by Söllner et al.
+soellner_homologues = tsv_df("https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5726313/bin/sdata2017185-s2.txt")
+#Each *_homologues data frame will hold a 'src' column, to inform what database each pair comes from
+soellner_homologues$src = "soellner"
+#Trim and reorder columns
+soellner_homologues = soellner_homologues[,c(7,2,3)]
+
+
+#ENSEMBL Biomart handles
+mmus_ensembl = useMart("ensembl", "mmusculus_gene_ensembl")
+rnov_ensembl = useMart("ensembl", "rnorvegicus_gene_ensembl")
+
+
+#ENSEMBL
+ensembl_homologues = getBM(
+	#For each mouse gene in ENSEMBL
+		mart=mmus_ensembl,						
+	#which has a rat homologue,
+		filters="with_rnorvegicus_homolog", values=TRUE,
+	#get its and the homologue's ENSEMBL gene IDs
+		attributes=c("ensembl_gene_id",	"rnorvegicus_homolog_ensembl_gene")
+	)
+#Format the df
+ensembl_homologues$src = "ensembl"
+colnames(ensembl_homologues) = c("mouse_ensgid", "rat_ensgid", "src")
+ensembl_homologues = ensembl_homologues[,c(3,1,2)]
+#Homology in ENSEMBL is bilateral, so there's no need to retrieve mouse homologues of rat genes
+
+
+#MGI
+mgi_homologues = tsv_df("https://www.informatics.jax.org/downloads/reports/HOM_AllOrganism.rpt")[,1:6]
+#The report contains genes of several species; restrict it to rat and mouse genes
+mgi_rat = mgi_homologues[mgi_homologues[,2] == "rat",]
+mgi_mouse = mgi_homologues[mgi_homologues[,2] == "mouse, laboratory",]
+
+#Lookup table, used to retrieve the mouse homologue of each rat gene in the list
+mgi_rat_to_mouse = match(mgi_rat[,1], mgi_mouse[,1])
+
+#Construct new data frame: one column is rat gene Entrez IDs, other column is mouse gene MGI IDs
+mgi_homologues = data.frame(src="mgi", rat_entrez = mgi_rat[,5], mouse_mgi = mgi_mouse[mgi_rat_to_mouse,6])
+
+#Lookup tables, used to convert Entrez and MGI IDs to ENSEMBL gene IDs
+mgi_to_ens = getBM(
+	#For each mouse gene in ENSEMBL
+		mart=mmus_ensembl,
+	#which has an MGI cross-reference,
+		filters="with_mgi", values=TRUE,
+	#get its ENSEMBL and MGI gene IDs
+		attributes=c("ensembl_gene_id",	"mgi_id")
+	)
+entrez_to_ens = getBM(
+	#For each rat gene in ENSEMBL
+		mart=rnov_ensembl,
+	#which has an Entrez cross-reference,
+		filters="with_entrezgene", values=TRUE,
+	#get its ENSEMBL and Entrez gene IDs
+		attributes=c("ensembl_gene_id",	"entrezgene_id")
+	)
+
+#Convert gene IDs to ENSEMBL ones
+mgi_homologues$mouse_ensgid = mgi_to_ens[match(mgi_homologues$mouse_mgi, mgi_to_ens$mgi_id),1]
+mgi_homologues$rat_ensgid = entrez_to_ens[match(mgi_homologues$rat_entrez, entrez_to_ens$entrezgene_id),1]
+
+#Reorder columns, remove genes which failed lookup
+mgi_homologues=na.omit(mgi_homologues[,c(1,4,5)])
+
+
+#HGNC
+hgnc_homologues = tsv_df("https://g-a8b222.dd271.03c0.data.globus.org/pub/databases/genenames/hgnc/tsv/hgnc_complete_set.txt")[,c(28,29)]
+#Restrict dataset to human homologues which have both a rat and mouse homologue
+hgnc_homologues = hgnc_homologues[hgnc_homologues$mgd_id != "" & hgnc_homologues$rgd_id != "",]
+
+#Lookup tables, used to convert RGD IDs to ENSEMBL gene IDs
+rgd_to_ens = getBM(
+	#For each rat gene in ENSEMBL
+		filters="with_rgd", values=TRUE,
+	#which has an RGD cross-reference,
+		mart=rnov_ensembl,
+	#get its ENSEMBL and RGD gene IDs
+		attributes=c("ensembl_gene_id",	"rgd_id")
+	)
+#Prepend RGD IDs in `rgd_to_ens' with "RGD:", since HGNC's RGD IDs are formatted as such
+rgd_to_ens$rgd_id = gsub("^", "RGD:", rgd_to_ens$rgd_id)
+
+#Convert gene IDs
+hgnc_homologues$mouse_ensgid = mgi_to_ens[match(hgnc_homologues$mgd_id, mgi_to_ens$mgi_id),1]
+hgnc_homologues$rat_ensgid = rgd_to_ens[match(hgnc_homologues$rgd_id, rgd_to_ens$rgd_id),1]
+
+#Format and sanitize the df
+hgnc_homologues$src = "hgnc"
+hgnc_homologues=na.omit(hgnc_homologues[,c(5,3,4)])
+
+
+#Join records
+homologues = rbind(soellner_homologues, ensembl_homologues, mgi_homologues, hgnc_homologues)
+#Dedupe
+homologues = homologues[!duplicated(homologues$mouse_ensgid) & !duplicated(homologues$rat_ensgid),]
+#Restrict list only to genes present in dataset
+in_dataset = homologues$mouse_ensgid %in% rownames(mice_raw) & homologues$rat_ensgid %in% rownames(rats_raw)
+homologues = homologues[in_dataset,]
+```
+
+
+The homologue pairs are used to subset and concatenate the matrices.
+Genes which lack a homologue will not be included in the combined dataset.
+```{r merge}
+paired = cbind(mice_raw[homologues$mouse_ensgid,], rats_raw[homologues$rat_ensgid,])
+
+#Helper function used in renaming samples
+#fields - what metadata to include in the name, and in what order
+sample_names = function(fields) sapply(apply(metadata[,fields], 1, paste, simplify=FALSE), paste, collapse="_")
+
+#Rename the sample such that they contain species and tissue type
+colnames(paired) = sample_names(c("species", "tissue"))
+```
+
+
+Before the reanalysis, the dataset needs to be filtered an normalized.
+For normalization, information about gene GC content is required, and so needs to be retrieved.
+```{r preprocess, warning=FALSE, message=FALSE}
+#Filter out 30% of genes with the lowest overall expression
+row_sums = apply(paired, 1, sum)
+above_cutoff = row_sums > quantile(row_sums, probs = 0.3)
+paired_f = paired[above_cutoff,]
+homologues_f = homologues[above_cutoff,]
+
+#Filter out mitochondrial genes
+mouse_mito = getBM(
+	#For every mouse gene in database
+		filters="chromosome_name", values="MT",
+	#to be mitochondrial,
+		mart=mmus_ensembl,
+	#get its ENSEMBL dene ID
+		attributes="ensembl_gene_id"
+	)[,1]
+rat_mito =getBM(
+	#Likewise for rat genes
+		mart=rnov_ensembl,
+		filters="chromosome_name", values="MT",
+		attributes="ensembl_gene_id"
+	)[,1]
+non_mito = !( homologues_f$mouse_ensgid %in% mouse_mito | homologues_f$rat_ensgid %in%rat_mito )
+paired_f = paired_f[non_mito,]
+homologues_f = homologues_f[non_mito,]
+#`paired_f' and `homologues_f' now hold the filtered genes
+
+
+#GC content lookup
+mouse_gc = getGeneLengthAndGCContent(homologues_f$mouse_ensgid, "mmus", "biomart")
+rat_gc   = getGeneLengthAndGCContent(homologues_f$rat_ensgid,   "rno",  "biomart")
+homologues_f$mouse_gc = mouse_gc[,"gc"]
+homologues_f$rat_gc   = rat_gc[,"gc"]
+#Remove genes whose GC content failed to lookup
+gc_content_known = ( !is.na(homologues_f$mouse_gc) & !is.na(homologues_f$rat_gc) )
+paired_f = paired_f[gc_content_known,]
+homologues_f = homologues_f[gc_content_known,]
+
+
+#Normalization
+paired_fn = paired_f
+paired_fn[,1:39]  = withinLaneNormalization(paired_f[,1:39],  homologues_f$mouse_gc, which="loess", round=TRUE)
+paired_fn[,40:79] = withinLaneNormalization(paired_f[,40:79], homologues_f$rat_gc,   which="loess", round=TRUE)
+#`paired_fn' is now the filtered and partially normalized dataset
+
+col_sums    = apply(paired, 2, sum)
+col_sums_fn = apply(paired_fn, 2, sum)
+norm_factors = calcNormFactors(paired_fn, method="TMM")
+col_sums_nn = col_sums
+
+i = 1
+while ( i < length(col_sums_fn) ){
+	col_sums_nn[i] = col_sums[i] * norm_factors[i]
+	i = i+1
+}
+mean_depth = mean(col_sums_nn)
+prior = paired_fn
+i = 1
+while ( i < ncol(prior) ){
+  prior[,i] = (paired_fn[,i]/col_sums_nn[i])*mean_depth
+  i = i+1
+}
+
+
+#Log-transform
+prior = log2(prior+1)
+#`prior' is now the dataset after preprocessing, but before adjustment
+```
+
+
+Before running ComBat, let's see how many genes there are in the dataset:
+```{r genecnt, results='asis'}
+gene_cnt = data.frame(
+	start = c(	nrow(soellner_homologues),
+				nrow(ensembl_homologues),
+				nrow(mgi_homologues),
+				nrow(hgnc_homologues),
+				nrow(mice_raw),
+				nrow(rats_raw)),
+	dedupe = c(	sum(homologues$src == "soellner"),
+				sum(homologues$src == "ensembl"),
+				sum(homologues$src == "mgi"),
+				sum(homologues$src == "hgnc"),
+				nrow(paired),
+				nrow(paired)),
+	filter = c(	sum(homologues_f$src == "soellner"),
+				sum(homologues_f$src == "ensembl"),
+				sum(homologues_f$src == "mgi"),
+				sum(homologues_f$src == "hgnc"),
+				nrow(paired_f),
+				nrow(paired_f))
+)
+
+gene_cnt$rate = ( gene_cnt$filter / gene_cnt$start ) * 100
+gene_cnt$rate = sprintf("%.2f%%", gene_cnt$rate)
+
+colnames(gene_cnt) = c("Initial gene count", "Merged and deduplicated", "Filtered", "Passthrough rate")
+rownames(gene_cnt) = c("Söllner et al.'s list", "ENSEMBL", "MGI", "HGNC", "Mouse dataset", "Rat dataset")
+
+kable(gene_cnt)
+```
+
+
+
+
+## Batch effect adjustment
+
+With the data fully preprocessed, ComBat is used to correct for batch effects.
+```{r combat}
+design = model.matrix(~1, data=metadata[,c("batch", "tissue", "species")])
+after = ComBat(dat=prior, batch=metadata$batch, mod=design, par.prior=TRUE)
+```
+
+
+
+
+## Assessment of clustering
+
+Statistical tests are carried out to verify whether the dataset exhibits *intra*-over-*inter* clustering, both for the dataset prior to and after adjustment.
+
+First, the data is converted to long format, and the tissue and species annotation of each sample are one-hot encoded.
+```{r stats1}
+prior_df = as.data.frame.table(prior)
+#Add columns for tissue and species
+extra_cols = do.call(rbind, strsplit(as.character(prior_df$Var2), split="_", fixed=TRUE, useBytes=TRUE))
+prior_df = cbind(prior_df, extra_cols)
+#Format df
+colnames(prior_df) = c("gene", "sample_name", "expr", "species", "tissue")
+
+#Likewise for adjusted data
+after_df = as.data.frame.table(after)
+after_df = cbind(after_df, extra_cols)
+colnames(after_df) = c("gene", "sample_name", "expr", "species", "tissue")
+
+#One-hot encoding
+extra_cols = data.frame(isMouse = as.numeric(prior_df$species == "Mouse"),
+						isRat =   as.numeric(prior_df$species == "Rat"))
+for (tissue in unique(metadata$tissue)) {
+	extra_cols = cbind(extra_cols, as.numeric(prior_df$tissue == tissue))
+	colnames(extra_cols)[ncol(extra_cols)] = paste0("is", tissue)
+}
+prior_df = cbind(prior_df, extra_cols)
+after_df = cbind(after_df, extra_cols)
+```
+
+With the data formatted properly, the model is fitted.
+```{r stats2, warning=FALSE, message=FALSE}
+prior_lm = lmer(
+	#Dependent variable
+		expr ~ 0 +
+	#Predictors
+		isMouse     + isRat        +
+		isPancreas  + isLiver      + isStomach  + isDuodenum    + isJejunum  +
+		isIleum     + isColon      + isKidney   + isQuadriceps  + isThymus   +
+		isHeart     + isEsophagus  + isBrain    + isKidneys     + isUnknown  +
+	#Blocking variable
+		(1|gene),
+	#Data source
+		data=prior_df
+	)
+
+after_lm = lmer(
+	#Dependent variable
+		expr ~ 0 +
+	#Predictors
+		isMouse     + isRat        +
+		isPancreas  + isLiver      + isStomach  + isDuodenum    + isJejunum  +
+		isIleum     + isColon      + isKidney   + isQuadriceps  + isThymus   +
+		isHeart     + isEsophagus  + isBrain    + isKidneys     + isUnknown  +
+	#Blocking variable
+		(1|gene),
+	#Data source
+		data=after_df
+	)
+```
+
+
+Let's inspect the model's coefficients:
+```{r stats3, results='asis'}
+kable(data.frame(	Before = summary(prior_lm)$coefficients[,1],
+					After =  summary(after_lm)$coefficients[,1]
+	), caption = "Model coefficients")
+```
+
+
+Lastly, the data before and after reanalysis is visualized.
+```{r visualization, fig.width=9, fig.height=9}
+#SVD plots
+prior_svd = svd(t(scale(t(prior), scale=FALSE, center=TRUE)))
+prior_svd = as.data.frame(prior_svd$v)
+prior_svd = cbind(prior_svd, metadata)
+
+after_svd = svd(t(scale(t(after), scale=FALSE, center=TRUE)))
+after_svd = as.data.frame(after_svd$v)
+after_svd = cbind(after_svd, metadata)
+
+ggplot(prior_svd) +
+	geom_point(aes(x=V1, y=V2, shape=species, col=tissue), size=3) + 
+	labs(title="Starting data: top 2 PCs of SVD") + 
+	theme(legend.title=element_blank(),
+		  text=element_text(size=14))
+ggplot(after_svd) +
+	geom_point(aes(x=V1, y=V2, shape=species, col=tissue), size=3) + 
+	labs(title="Reanalzyed data: top 2 PCs of SVD") + 
+	theme(legend.title=element_blank(),
+		  text=element_text(size=14))
+
+#Heatmaps
+pheatmap(cor(prior),
+		 border_color = NA,
+		 fontsize=8,
+		 main="Starting data: pairwise Pearson correlation of expression data")
+pheatmap(cor(after),
+		 border_color = NA,
+		 fontsize=8,
+		 main="Reanalyzed data: pairwise Pearson correlation of expression data")
+```
